@@ -63,4 +63,70 @@ async def check_att_fiber(address: str) -> str:
             no_fiber = ["growing our home internet", "notify me", "internet air is available at your address", "be the first to know"]
             fiber = ["fiber® is available", "fiber is available", "choose your plan", "300mbps speed", "500mbps speed", "1 gig speed", "select this plan"]
             for kw in no_fiber:
-                if kw
+                if kw in content:
+                    print(f"No fiber: {kw}")
+                    return "no_fiber"
+            for kw in fiber:
+                if kw in content:
+                    print(f"Fiber: {kw}")
+                    return "fiber"
+            return "no_fiber"
+        except Exception as e:
+            print(f"Error: {e}")
+            return "error"
+        finally:
+            await browser.close()
+
+
+def add_tag(contact_id, tag):
+    url = f"https://services.leadconnectorhq.com/contacts/{contact_id}/tags"
+    headers = {"Authorization": f"Bearer {GHL_API_KEY}", "Content-Type": "application/json", "Version": "2021-07-28"}
+    resp = requests.post(url, json={"tags": [tag]}, headers=headers)
+    print(f"Tag: {resp.status_code} {resp.text}")
+    return resp.status_code == 200
+
+
+def get_contact(contact_id):
+    url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
+    headers = {"Authorization": f"Bearer {GHL_API_KEY}", "Version": "2021-07-28"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        return resp.json().get("contact", {})
+    print(f"Error contacto: {resp.status_code} {resp.text}")
+    return None
+
+
+@app.route("/verify-fiber", methods=["POST"])
+def verify_fiber():
+    data = request.json or {}
+    contact_id = data.get("contact_id") or data.get("id")
+    if not contact_id:
+        return jsonify({"error": "contact_id requerido"}), 400
+    contact = get_contact(contact_id)
+    if not contact:
+        return jsonify({"error": "Contacto no encontrado"}), 404
+    address = contact.get("address1", "").strip()
+    city = contact.get("city", "").strip()
+    state = contact.get("state", "").strip()
+    postal = contact.get("postalCode", "").strip()
+    if not address:
+        return jsonify({"error": "Direccion vacia"}), 400
+    full_address = address
+    if city: full_address += f", {city}"
+    if state: full_address += f", {state}"
+    if postal: full_address += f" {postal}"
+    print(f"Verificando: {full_address}")
+    result = asyncio.run(check_att_fiber(full_address))
+    tag = TAG_FIBER if result == "fiber" else TAG_NO_FIBER
+    tag_ok = add_tag(contact_id, tag)
+    return jsonify({"contact_id": contact_id, "address": full_address, "result": result, "tag": tag, "tag_applied": tag_ok})
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
