@@ -69,8 +69,6 @@ async def check_att_fiber(address: str) -> str:
             if any(kw in content for kw in ["300mbps speed", "500mbps speed", "1 gig speed", "pick an internet plan"]):
                 return "fiber"
             return "no_fiber"
-                    return "fiber"
-            return "no_fiber"
         except Exception as e:
             print(f"Error: {e}")
             return "error"
