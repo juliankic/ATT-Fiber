@@ -60,15 +60,15 @@ async def check_att_fiber(address: str) -> str:
             current_url = page.url
             content = (await page.content()).lower()
             print(f"URL: {current_url}")
-            no_fiber = ["growing our home internet", "notify me", "internet air is available at your address", "be the first to know"]
-            fiber = ["fiber® is available", "fiber is available", "choose your plan", "300mbps speed", "500mbps speed", "1 gig speed", "select this plan"]
-            for kw in no_fiber:
-                if kw in content:
-                    print(f"No fiber: {kw}")
-                    return "no_fiber"
-            for kw in fiber:
-                if kw in content:
-                    print(f"Fiber: {kw}")
+            if "great news" in content and "fiber" in content:
+                return "fiber"
+            if any(kw in content for kw in ["growing our home internet", "be the first to know", "sign up and we"]):
+                return "no_fiber"
+            if "internet air is available" in content and "great news" not in content:
+                return "no_fiber"
+            if any(kw in content for kw in ["300mbps speed", "500mbps speed", "1 gig speed", "pick an internet plan"]):
+                return "fiber"
+            return "no_fiber"
                     return "fiber"
             return "no_fiber"
         except Exception as e:
