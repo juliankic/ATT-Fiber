@@ -15,14 +15,37 @@ TAG_AIR      = "internet-air-eligible"
 TAG_EXISTING = "existing-account"
 
 
+async def wait_for_att_result(page, timeout_ms=25000):
+    """
+    Espera hasta que la URL de AT&T llegue a su estado final.
+    AT&T siempre termina en una de estas URLs:
+      - /buy/internet/not-available   -> sin cobertura
+      - /buy/internet/plans           -> fibra o air disponible
+      - /buy/internet/plans?address_id=XXX -> fibra (variante)
+    """
+    start = asyncio.get_event_loop().time()
+
+    while True:
+        await asyncio.sleep(1)
+        current_url = page.url
+        elapsed = (asyncio.get_event_loop().time() - start) * 1000
+
+        if "not-available" in current_url:
+            await page.wait_for_timeout(2000)
+            print(f"Navigation settled at not-available ({elapsed:.0f}ms)")
+            return current_url
+
+        if "/buy/internet/plans" in current_url:
+            await page.wait_for_timeout(4000)
+            print(f"Navigation settled at plans ({elapsed:.0f}ms)")
+            return current_url
+
+        if elapsed > timeout_ms:
+            print(f"Navigation timeout after {elapsed:.0f}ms, url={current_url}")
+            return current_url
+
+
 async def check_att_fiber(address: str) -> dict:
-    """
-    Returns:
-    {
-        "coverage": "fiber" | "air" | "none" | "error",
-        "existing_account": True | False
-    }
-    """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -36,7 +59,7 @@ async def check_att_fiber(address: str) -> dict:
             await page.goto("https://www.att.com/internet/availability/", timeout=30000)
             await page.wait_for_timeout(4000)
 
-            # ── Dismiss cookie banners ───────────────────────────────────────────
+            # Dismiss cookie banners
             try:
                 cookie_btn = page.locator(
                     'button:has-text("Continue without changes"), button:has-text("Opt out")'
@@ -51,7 +74,7 @@ async def check_att_fiber(address: str) -> dict:
             await page.wait_for_timeout(1500)
             await page.screenshot(path="/tmp/debug_1.png")
 
-            # ── Ingresar dirección ───────────────────────────────────────────────
+            # Ingresar direccion
             address_input = await page.wait_for_selector(
                 'input[placeholder*="Main st" i], input[placeholder*="address" i], input[id*="address" i]',
                 timeout=15000
@@ -64,7 +87,7 @@ async def check_att_fiber(address: str) -> dict:
             await page.wait_for_timeout(3000)
             await page.screenshot(path="/tmp/debug_2.png")
 
-            # ── Autocomplete ─────────────────────────────────────────────────────
+            # Autocomplete
             suggestion = page.locator(
                 '[role="option"], [class*="suggestion" i], [class*="pac-item" i]'
             ).first
@@ -77,21 +100,19 @@ async def check_att_fiber(address: str) -> dict:
                 await address_input.press("Enter")
                 await page.wait_for_timeout(1500)
 
-            # ── Click "Check availability" ───────────────────────────────────────
+            # Click Check availability
             btn = page.locator(
                 'button:has-text("Check availability"), button:has-text("Check Availability")'
             ).first
             if await btn.count() > 0:
                 await btn.click()
 
-            # Esperar que la página cargue y los modales aparezcan
-            await page.wait_for_timeout(8000)
-            await page.screenshot(path="/tmp/debug_3.png")
+            # Esperar URL final — NO timeout fijo
+            await page.screenshot(path="/tmp/debug_3_pre_wait.png")
+            final_url = await wait_for_att_result(page, timeout_ms=30000)
+            await page.screenshot(path="/tmp/debug_3_post_wait.png")
 
-            # ════════════════════════════════════════════════════════════════════
             # MODAL 1: "We couldn't pinpoint your address"
-            # Siempre seleccionar la PRIMERA opción (más similar a la original).
-            # ════════════════════════════════════════════════════════════════════
             pinpoint_modal = page.locator("text=We couldn't pinpoint your address")
             if await pinpoint_modal.count() > 0:
                 print("Modal detected: address disambiguation")
@@ -113,80 +134,47 @@ async def check_att_fiber(address: str) -> dict:
                 if await continue_btn.count() > 0:
                     await continue_btn.click()
                     print("Clicked Continue on address modal")
-                    # Esperar a que aparezcan los modales siguientes
-                    await page.wait_for_timeout(8000)
+                    final_url = await wait_for_att_result(page, timeout_ms=25000)
                     await page.screenshot(path="/tmp/debug_after_pinpoint.png")
 
-            # ════════════════════════════════════════════════════════════════════
             # MODAL 2: "We found an existing AT&T account at this address"
-            #
-            # Este modal puede aparecer en DOS momentos y DOS URLs:
-            #   A) URL = /not-available  → modal sobre página en blanco (imagen 1 anterior)
-            #   B) URL = /buy/internet/plans → modal sobre página de planes (imagen 3)
-            #      En el caso B los planes ya son visibles en el fondo,
-            #      pero debemos hacer clic "No, I'm new" para leer contenido limpio.
-            #
-            # Frase exacta confirmada en screenshots:
-            # "We found an existing AT&T account at this address."
-            # ════════════════════════════════════════════════════════════════════
             existing_modal = page.locator("text=We found an existing AT&T account at this address")
             if await existing_modal.count() > 0:
                 print("Modal detected: existing AT&T account")
                 existing_account = True
                 await page.screenshot(path="/tmp/debug_modal_existing.png")
 
-                # También capturar si el modal ya dice "Great news! AT&T Fiber is available"
-                # (visible en título del modal — imágenes 1 y 3)
                 modal_content = (await page.content()).lower()
                 modal_has_fiber = any(phrase in modal_content for phrase in [
                     "great news! at&t fiber",
-                    "great news! at&t fiber®",
+                    "great news! at&t fiber\u00ae",
                 ])
                 if modal_has_fiber:
-                    print("Modal also confirms: fiber available at address")
+                    print("Modal title confirms: fiber available")
 
-                # Clic en "No, I'm new to AT&T" para ver los planes
                 new_btn = page.locator("button:has-text(\"No, I'm new to AT&T\")").first
                 if await new_btn.count() > 0:
                     await new_btn.click()
                     print("Clicked 'No, I'm new to AT&T'")
-                    await page.wait_for_timeout(8000)
+                    await page.wait_for_timeout(6000)
+                    final_url = page.url
                     await page.screenshot(path="/tmp/debug_after_existing.png")
                 else:
-                    # Si no encuentra el botón, igual marcar fiber si el modal lo confirma
                     if modal_has_fiber:
                         print("Result: fiber (modal confirmed, button not found)")
                         return {"coverage": "fiber", "existing_account": True}
 
-            # ── Leer estado final ────────────────────────────────────────────────
+            # Leer estado final
             current_url = page.url
             content = (await page.content()).lower()
             print(f"URL final: {current_url}")
-            print(f"Content snippet (1500-3000): {content[1500:3000]}")
 
-            # ════════════════════════════════════════════════════════════════════
-            # REGLAS DE DETECCIÓN
-            #
-            # URLs conocidas confirmadas en screenshots:
-            #   Fiber:    /buy/internet/plans
-            #             /buy/internet/plans?address_id=XXXXXXX
-            #   No fiber: /buy/internet/not-available
-            # ════════════════════════════════════════════════════════════════════
-
-            # REGLA 1: URL explícita de no cobertura
-            # Solo aplicar si no hay frases de fibra confirmada en el contenido
+            # REGLA 1: URL not-available = sin cobertura (regla mas confiable)
             if "not-available" in current_url:
-                has_fiber_in_content = any(phrase in content for phrase in [
-                    "great news! at&t fiber",
-                    "great news! at&t fiber®",
-                    "at&t fiber is available",
-                    "at&t fiber® is available",
-                ])
-                if not has_fiber_in_content:
-                    print("Result: none (URL not-available, no fiber content)")
-                    return {"coverage": "none", "existing_account": existing_account}
+                print("Result: none (URL = not-available)")
+                return {"coverage": "none", "existing_account": existing_account}
 
-            # REGLA 2: Textos explícitos de no cobertura
+            # REGLA 2: Textos de no cobertura
             no_coverage_phrases = [
                 "give us a call to see if home internet",
                 "growing our home internet",
@@ -202,13 +190,11 @@ async def check_att_fiber(address: str) -> dict:
                     return {"coverage": "none", "existing_account": existing_account}
 
             # REGLA 3: Fiber CONFIRMADO
-            # Frases exactas confirmadas en screenshots (con y sin ®):
-            #   "Great news! AT&T Fiber® is available at:"  ← imagen 2 y 3
             fiber_confirmed_phrases = [
-                "great news! at&t fiber® is available",   # ← frase exacta screenshots
+                "great news! at&t fiber\u00ae is available",
                 "great news! at&t fiber is available",
                 "great news! att fiber is available",
-                "at&t fiber® is available at",
+                "at&t fiber\u00ae is available at",
                 "at&t fiber is available at",
                 "att fiber is available",
                 "fiber internet is available",
@@ -233,18 +219,15 @@ async def check_att_fiber(address: str) -> dict:
                     print(f"Result: air (confirmed: '{phrase}')")
                     return {"coverage": "air", "existing_account": existing_account}
 
-            # REGLA 5: Planes de fibra visibles (velocidades + precio)
-            # Keywords exactos confirmados en screenshots:
-            # "300Mbps speed", "Up to 1 GIG speed", "100Mbps speed"
+            # REGLA 5: Planes de fibra visibles
             fiber_speed_keywords = [
-                "300mbps speed",       # AT&T Internet 300 — confirmado
+                "300mbps speed",
                 "500mbps speed",
-                "up to 1 gig speed",   # AT&T Internet 1000 — confirmado
+                "up to 1 gig speed",
                 "1 gig speed",
                 "2 gig speed",
                 "5 gig speed",
-                "100mbps speed",       # AT&T Internet 100 — confirmado
-                "fiber 300", "fiber 500",
+                "100mbps speed",
             ]
             has_fiber_speed = any(kw in content for kw in fiber_speed_keywords)
             has_price = "/mo" in content or "per month" in content
@@ -257,13 +240,13 @@ async def check_att_fiber(address: str) -> dict:
                 print(f"Result: fiber (speed+price, fiber_count={fiber_word_count})")
                 return {"coverage": "fiber", "existing_account": existing_account}
 
-            # REGLA 6: Internet Air con "great news" sin velocidades de fibra
+            # REGLA 6: Internet Air
             if has_air_mention and "great news" in content and not has_fiber_speed:
-                print("Result: air (great news + air mention, no fiber speeds)")
+                print("Result: air (great news + air, no fiber speeds)")
                 return {"coverage": "air", "existing_account": existing_account}
 
             # FALLBACK
-            print(f"Result: none (fallback, url={current_url})")
+            print(f"Result: none (fallback, fiber_count={fiber_word_count})")
             return {"coverage": "none", "existing_account": existing_account}
 
         except Exception as e:
@@ -344,11 +327,11 @@ def verify_fiber():
             tags_applied.append(TAG_EXISTING)
 
     return jsonify({
-        "contact_id":     contact_id,
-        "address":        full_address,
-        "coverage":       coverage,
+        "contact_id":       contact_id,
+        "address":          full_address,
+        "coverage":         coverage,
         "existing_account": existing,
-        "tags_applied":   tags_applied
+        "tags_applied":     tags_applied
     })
 
 
